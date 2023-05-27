@@ -1,0 +1,4 @@
+1. page 0 -> text and data
+   page 1 -> guard page
+   page 2 -> stack
+2. avoid overflow
