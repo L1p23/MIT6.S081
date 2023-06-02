@@ -67,6 +67,40 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if (r_scause() == 13 || r_scause() == 15) {
+    uint64 va = r_stval();
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if (DEBUG) {
+      printf("\npage fault\n");
+      vmprint(p->pagetable);
+      printf("va %p\n pte %p\n", va, *pte);
+    }
+    if (va < p->sz && pte != 0 && (*pte & PTE_V) && (*pte & PTE_COW)) {
+      uint64 pa = PTE2PA(*pte);
+      uint64 ka = copypa(pa);
+      if (ka == 0)
+        p->killed = 1;
+      else {
+        if (DEBUG)
+          printf("COW pa %p\n", pa);
+        if (ka == pa) {
+          *pte = (*pte | PTE_W) & ~PTE_COW;
+          if (DEBUG)
+            printf("ka == pa %p\n", pa);
+        }
+        else {
+          // ！！！先保存flags再unmap，unmap后*pte=0
+          uint flags = (PTE_FLAGS(*pte)|PTE_W) & (~PTE_COW);
+          uvmunmap(p->pagetable, PGROUNDDOWN(va), 1, 0);
+          if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, ka, flags) != 0) {
+            kfree((char *)ka);
+            p->killed = 1;
+          }
+        }
+      }
+    }
+    else
+      p->killed = 1;
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
