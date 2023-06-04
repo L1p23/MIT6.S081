@@ -387,7 +387,7 @@ bmap(struct inode *ip, uint bn)
   }
   bn -= NDIRECT;
 
-  if(bn < NINDIRECT){
+  if(bn < NSINGLYINDIRECT){
     // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0)
       ip->addrs[NDIRECT] = addr = balloc(ip->dev);
@@ -397,6 +397,38 @@ bmap(struct inode *ip, uint bn)
       a[bn] = addr = balloc(ip->dev);
       log_write(bp);
     }
+    brelse(bp);
+    return addr;
+  }
+  //bn -= NSINGLYINDIRECT;
+
+  if (bn < NINDIRECT) {
+    bn -= NSINGLYINDIRECT;
+    // Load doubly-indirect block to buffer cache
+    if ((addr = ip->addrs[NDIRECT + 1]) == 0)
+      ip->addrs[NDIRECT + 1] = addr = balloc(ip->dev);
+    bp = bread(ip->dev, addr);
+
+    // number of singly-indirect block
+    uint sn = bn / NSINGLYINDIRECT;
+    a = (uint *)bp->data;
+    // Load singly-indirect block to buffer cache
+    if ((addr = a[sn]) == 0) {
+      a[sn] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    // relse doubly-indirect block
+    brelse(bp);
+    bp = bread(ip->dev, addr);
+    // number of block in singly-indirect block
+    bn = bn % NSINGLYINDIRECT;
+    a = (uint *)bp->data;
+    // alloc block if need
+    if ((addr = a[bn]) == 0) {
+      a[bn] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    // relse singly-indirect block
     brelse(bp);
     return addr;
   }
@@ -423,13 +455,38 @@ itrunc(struct inode *ip)
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
+    for(j = 0; j < NSINGLYINDIRECT; j++){
       if(a[j])
         bfree(ip->dev, a[j]);
     }
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  // Trunc doubly-indirect block
+  if (ip->addrs[NDIRECT + 1]) {
+    bp = bread(ip->dev, ip->addrs[NDIRECT + 1]);
+    a = (uint *)bp->data;
+    // Trunc singly-indirect block
+    for (j = 0; j < NSINGLYINDIRECT; j++) {
+      if (a[j]) {
+        // Load singly-indirect block
+        struct buf *sbp = bread(ip->dev, a[j]);
+        uint *sa = (uint*)sbp->data;
+        for (int i = 0; i < NSINGLYINDIRECT; i++) {
+          if(sa[i])
+            bfree(ip->dev, sa[i]);
+        }
+        brelse(sbp);
+        bfree(ip->dev, a[j]);
+        a[j] = 0;
+      }
+    }
+    // free doubly-indirect block
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT + 1]);
+    ip->addrs[NDIRECT + 1] = 0;
   }
 
   ip->size = 0;
