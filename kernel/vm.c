@@ -5,6 +5,11 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "fcntl.h"
+#include "file.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -183,6 +188,46 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   }
 }
 
+void
+mmapunmap(pagetable_t pagetable, uint64 va, uint64 nbytes, struct vm_area *vma)
+{
+  uint64 a;
+  pte_t *pte;
+
+  for (a = PGROUNDDOWN(va); a < va + nbytes; a += PGSIZE) {
+    if ((pte = walk(pagetable, a, 0)) == 0)
+      panic("mmapunmap: walk");
+    if ((*pte & PTE_V) == 0)
+      continue;   // lazy allocation
+    if (PTE_FLAGS(*pte) == PTE_V)
+      panic("mmapunmap: not a leaf");
+    uint64 pa = PTE2PA(*pte);
+    if ((*pte & PTE_D) && (vma->flags & MAP_SHARED)) {
+      begin_op();
+      ilock(vma->f->ip);
+      uint n;
+      if (va > a) {
+        if (PGROUNDUP(va) - va <= nbytes)
+          n =  PGSIZE;
+        else
+          n = nbytes;
+        writei(vma->f->ip, 0, pa + (va - a), (va - vma->vm_start) + vma->offset, n);
+      }
+      else {
+        if (a + PGSIZE <= va + nbytes)
+          n = PGSIZE;
+        else
+          n = va + nbytes - a;
+        writei(vma->f->ip, 0, pa, (a - vma->vm_start) + vma->offset, n);
+      }
+      iunlock(vma->f->ip);
+      end_op();
+    }
+    kfree((void *)pa);
+    *pte = 0;
+  }
+}
+
 // create an empty user page table.
 // returns 0 if out of memory.
 pagetable_t
@@ -323,6 +368,26 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
+
+/*int
+vmaptcopy(pagetable_t old, pagetable_t new, struct vm_area *vma)
+{
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+
+  for (i = vma->vm_start; i < vma->vm_start + vma->sz; i += PGSIZE) {
+    if ((pte = walk(old, i, 0)) == 0)
+      panic("vmaptcopy: pte should exist");
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+    if (mappages(new, i, PGSIZE, pa, flags) != 0) {
+      uvmunmap(new, vma->vm_start, (i - vma->vm_start)/PGSIZE, 0);
+      return -1;
+    }
+  }
+  return 0;
+}*/
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.

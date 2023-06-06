@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -133,6 +134,9 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  // clear vma
+  memset(p->vmas, 0, sizeof(struct vm_area) * NVMA);
 
   return p;
 }
@@ -274,6 +278,23 @@ fork(void)
     return -1;
   }
 
+  // copy vmas
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].valid) {
+      memmove(&np->vmas[i], &p->vmas[i], sizeof(struct vm_area));
+      filedup(np->vmas[i].f);
+      // shared pa if MAP_SHARED
+      // mmap使用的空间在p->sz之上，手动复制
+      //if (np->vmas[i].flags & MAP_SHARED) {
+        //if (vmaptcopy(p->pagetable, np->pagetable, &np->vmas[i]) < 0) {
+          //freeproc(np);
+          //release(&np->lock);
+          //return -1;
+        //}
+      //}
+    }
+  }
+
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     freeproc(np);
@@ -343,6 +364,14 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // munmap
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].valid) {
+      mmapunmap(p->pagetable, p->vmas[i].vm_start, p->vmas[i].sz, &p->vmas[i]);
+      p->vmas[i].valid = 0;
+    }
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

@@ -65,3 +65,7 @@
 //   TRAPFRAME (p->trapframe, used by the trampoline)
 //   TRAMPOLINE (the same page as in the kernel)
 #define TRAPFRAME (TRAMPOLINE - PGSIZE)
+
+// address for memory-mapping a file
+// 从trapframe下方开始，向下增长
+#define MMAPADDR TRAPFRAME

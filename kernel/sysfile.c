@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -482,5 +483,100 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr, length, offset;
+  int prot, flags, fd;
+  struct file *f;
+
+  if (argaddr(0, &addr) < 0 || argaddr(1, &length) < 0 || argint(2, &prot) < 0 \
+      || argint(3, &flags) < 0 || argfd(4, &fd, &f) < 0 || argaddr(5, &offset) < 0)
+    return -1;
+  
+  if (!f->readable && (prot & PROT_READ))
+    return -1;
+
+  // 不可写文件可以以写权限映射但是不能写回
+  if (!f->writable && (prot & PROT_WRITE) && (flags & MAP_SHARED))
+    return -1;
+
+  struct proc *p = myproc();
+  struct vm_area *vma = 0;
+  if (addr == 0)
+    addr = MMAPADDR;
+
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].valid == 0) {
+      if (vma == 0)
+        vma = &p->vmas[i];
+    }
+    else if (p->vmas[i].vm_start < addr)
+      addr = p->vmas[i].vm_start;
+  }
+  addr = PGROUNDDOWN(addr - length);
+
+  if (addr < p->sz || vma == 0)
+    return -1;
+
+  vma->valid = 1;
+  vma->f = f;
+  vma->vm_start = addr;
+  vma->sz = length;
+  vma->offset = offset;
+  vma->prot = prot;
+  vma->flags = flags;
+
+  filedup(vma->f);
+
+  return vma->vm_start;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr, length;
+
+  if (argaddr(0, &addr) < 0 || argaddr(1, &length) < 0)
+    return -1;
+  
+  struct proc *p = myproc();
+  struct vm_area *vma = 0;
+  
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].valid && addr >= p->vmas[i].vm_start && addr < p->vmas[i].vm_start + p->vmas[i].sz) {
+      vma = &p->vmas[i];
+      break;
+    }
+  }
+
+  if (vma == 0 || addr + length > vma->vm_start + vma->sz)
+    return -1;
+  
+  // punch a hole
+  if (addr > vma->vm_start && addr + length < vma->vm_start + vma->sz)
+    return -1;
+
+  mmapunmap(p->pagetable, addr, length, vma);
+
+  // unmap at the start
+  if (addr == vma->vm_start) {
+    vma->vm_start += length;
+    vma->offset += length;
+  }
+  else {
+    // unmap at the end
+    ;
+  }
+
+  vma->sz -= length;
+  if (vma->sz == 0) {
+    fileclose(vma->f);
+    vma->valid = 0;
+  }
+
   return 0;
 }
