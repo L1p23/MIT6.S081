@@ -136,6 +136,7 @@ found:
 static void
 freeproc(struct proc *p)
 {
+  //printf("freeing... %d\n", p->pid);
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
@@ -192,11 +193,9 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
-  if (DEBUG) {
-    printf("\nfree\n");
-    vmprint(pagetable);
-  }
+  //printf("before free %d\n", emptypage());
   uvmfree(pagetable, sz);
+  //printf("after free %d\n", emptypage());
 }
 
 // a user program that calls exec("/init")
@@ -337,7 +336,7 @@ void
 exit(int status)
 {
   struct proc *p = myproc();
-
+  //printf("exiting... %d\n", p->pid);
   if(p == initproc)
     panic("init exiting");
 
@@ -404,6 +403,37 @@ wait(uint64 addr)
   struct proc *np;
   int havekids, pid;
   struct proc *p = myproc();
+
+  // preload physical page to save addr
+  // 父进程在wait中等待子进程结束
+  // 子进程用完了所有物理内存 killed
+  // 父进程被唤醒，将子进程的退出状态写入addr
+  // 此时物理页被用完，而addr是cow页面
+  // addr无法被分配内存，退出状态写入失败
+  // 子进程资源此时无法顺利被释放，须等到init
+  // 在子进程未被释放时所有物理页都被占用
+  // 父进程的wait没有接收到预期返回值且无物理页
+  pte_t *pte = walk(p->pagetable, addr, 0);
+  if (addr < p->sz && PGROUNDDOWN(addr) != r_sp() && *pte != 0 && (*pte & PTE_V) && (*pte & PTE_COW)) {
+    // cow
+    uint64 pa = PTE2PA(*pte);
+    uint64 ka = copypa(pa);
+    if (ka == 0) {
+      //printf("cow: out of memory\n");
+      return -1;
+    }
+    if (ka == pa)
+      *pte = (*pte | PTE_W) & ~PTE_COW;
+    else {
+      // ！！！先保存flags再unmap，unmap后*pte=0
+      uint flags = (PTE_FLAGS(*pte)|PTE_W) & (~PTE_COW);
+      uvmunmap(p->pagetable, PGROUNDDOWN(addr), 1, 0);
+      if (mappages(p->pagetable, PGROUNDDOWN(addr), PGSIZE, ka, flags) != 0) {
+        kfree((char *)ka);
+        p->killed = 1;
+      }
+    }
+  }
 
   // hold p->lock for the whole time to avoid lost
   // wakeups from a child's exit().

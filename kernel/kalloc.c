@@ -92,9 +92,13 @@ kalloc(void)
 
   if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
-    //acquire(&reflock);
-    refcount[PA2IDX((uint64)r)] = 1;
-    //release(&reflock);
+    if (holding(&reflock))
+      refcount[PA2IDX((uint64)r)] = 1;
+    else {
+      acquire(&reflock);
+      refcount[PA2IDX((uint64)r)] = 1;
+      release(&reflock);
+    }
   }
   return (void*)r;
 }
@@ -133,4 +137,19 @@ copypa(uint64 pa)
   --refcount[PA2IDX(pa)];
   release(&reflock);
   return (uint64)ka;
+}
+
+int
+emptypage()
+{
+  struct run *r;
+  acquire(&kmem.lock);
+  r = kmem.freelist;
+  int count = 0;
+  while (r) {
+    count++;
+    r = r->next;
+  }
+  release(&kmem.lock);
+  return count;
 }

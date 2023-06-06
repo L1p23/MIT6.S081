@@ -69,38 +69,47 @@ usertrap(void)
     // ok
   } else if (r_scause() == 13 || r_scause() == 15) {
     uint64 va = r_stval();
+    // PGROUNDDOWN(va) != r_sp() 防止栈溢出到 guardpage 仍被分配内存
+    if (va >= p->sz || PGROUNDDOWN(va) == r_sp())
+      goto err;
     pte_t *pte = walk(p->pagetable, va, 0);
-    if (DEBUG) {
-      printf("\npage fault\n");
-      vmprint(p->pagetable);
-      printf("va %p\n pte %p\n", va, *pte);
+    if (pte == 0 || (*pte & PTE_V) == 0) {
+      // lazyallocation
+      char *ka = kalloc();
+      if (ka == 0) {
+        printf("lazyalloc: out of memory\n");
+        goto err;
+      }
+      memset(ka, 0, PGSIZE);
+      if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)ka, PTE_R|PTE_W|PTE_U|PTE_X) != 0) {
+        kfree(ka);
+        goto err;
+      }
     }
-    if (va < p->sz && pte != 0 && (*pte & PTE_V) && (*pte & PTE_COW)) {
+    else if (*pte & PTE_COW) {
+      // cow
       uint64 pa = PTE2PA(*pte);
       uint64 ka = copypa(pa);
-      if (ka == 0)
-        p->killed = 1;
+      if (ka == 0) {
+        //printf("cow: out of memory\n");
+        goto err;
+      }
+      if (ka == pa)
+        *pte = (*pte | PTE_W) & ~PTE_COW;
       else {
-        if (DEBUG)
-          printf("COW pa %p\n", pa);
-        if (ka == pa) {
-          *pte = (*pte | PTE_W) & ~PTE_COW;
-          if (DEBUG)
-            printf("ka == pa %p\n", pa);
-        }
-        else {
-          // ！！！先保存flags再unmap，unmap后*pte=0
-          uint flags = (PTE_FLAGS(*pte)|PTE_W) & (~PTE_COW);
-          uvmunmap(p->pagetable, PGROUNDDOWN(va), 1, 0);
-          if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, ka, flags) != 0) {
-            kfree((char *)ka);
-            p->killed = 1;
-          }
+        // ！！！先保存flags再unmap，unmap后*pte=0
+        uint flags = (PTE_FLAGS(*pte)|PTE_W) & (~PTE_COW);
+        uvmunmap(p->pagetable, PGROUNDDOWN(va), 1, 0);
+        if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, ka, flags) != 0) {
+          kfree((char *)ka);
+          p->killed = 1;
         }
       }
     }
-    else
+    else {
+      err:
       p->killed = 1;
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

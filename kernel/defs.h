@@ -66,6 +66,7 @@ void            kinit(void);
 void            refpa(uint64);
 uint64          copypa(uint64);
 int             getref(uint64);
+int             emptypage();
 
 // log.c
 void            initlog(int, struct superblock*);
